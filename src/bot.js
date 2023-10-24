@@ -1,38 +1,64 @@
+import {Path} from "runtime-compat/fs";
 import irc from "irc-upd";
-import {config} from "dotenv";
-import commands from "./commands.js";
+import env from "runtime-compat/env";
+import on_message from "./on-message.js";
 
-config();
-
-const {network, user, channels, password} = process.env;
+const {network, user, channels, password} = env;
+const users = new Path(import.meta.url).up(1).join("db", "users.json");
 
 const client = new irc.Client(network, user, {
   channels: channels.split(";"),
   password,
 });
+const space = 2;
 
-const commandNames = Object.keys(commands);
+const record = {
+  users: await users.json() ?? {},
+  create(nick) {
+    if (this.users[nick] === undefined) {
+      this.users[nick] = {};
+    }
+  },
+  async save() {
+    await users.file.write(JSON.stringify(this.users, null, space));
+  },
+  quit(nick) {
+    this.create(nick);
+    this.users[nick].quit = new Date();
+    this.save();
+  },
+  join(nick) {
+    this.create(nick);
+    this.users[nick].join = new Date();
+    this.save();
+  },
+  message(nick) {
+    this.create(nick);
+    this.users[nick].message = new Date();
+    this.save();
+  },
+};
 
-const eq = right => left => left === right;
+client.addListener("join", (_, nick) => {
+  record.join(nick);
+});
 
-const onMessage = async (from, to, message) => {
-  // message must start with !
-  if (!message.startsWith("!")) {
-    return;
-  }
+client.addListener("quit", nick => {
+  record.quit(nick);
+});
 
-  const [command, ...params] = message.slice(1).split(" ");
-  // must be a valid command
-  if (!commandNames.some(eq(command))) {
-    return;
-  }
-
+client.addListener("message", async (from, to, message) => {
   // only react if in channel
   if (!channels.includes(to)) {
     return;
   }
 
-  (await commands[command](params.join(" "))).forEach(line => client.say(to, line));
-};
+  record.message(from);
 
-client.addListener("message", onMessage);
+  try {
+    (await on_message(to, message, {client, from}))((...args) =>
+      client.say(...args));
+  } catch (error) {
+    //console.log(error);
+  }
+});
